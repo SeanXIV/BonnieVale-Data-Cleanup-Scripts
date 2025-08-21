@@ -1,0 +1,15 @@
+# Ignore root-level input CSVs (original spreadsheets)
+/*.csv
+
+# Ignore generated outputs
+/outputs/
+/outputs_*/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+
