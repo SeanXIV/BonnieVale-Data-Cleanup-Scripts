@@ -3,12 +3,19 @@
 ### Overview
 This repository contains scripts to clean and restructure the cohort spreadsheet into three linked tables without altering the original data. The processing is non-destructive: the original CSV remains unchanged and outputs are written to the outputs/ folder.
 
-- Input: 2024 JGT Cohort - 2024 Cohort.csv (CSV with multi-line cells and a two-row header)
+- Input: CSV with multi-line cells and a two-row header (group labels + column labels)
 - Outputs:
   - outputs/table_personal_parent.csv
   - outputs/table_study_support.csv
   - outputs/table_engagement_progress.csv
-- Linking key across tables: ID_Number (rows without an ID are kept with an empty key so no data is lost)
+- Linking key across tables: Student_ID (generated). ID_Number (SA ID) is still included in Table 1 but is no longer the link key.
+
+Student_ID format (single word): first 2 letters of Name + first 2 letters of Surname + CohortYear
+- Example: “Bjorn AFRICA” in 2024 → bjaf2024
+- Diacritics removed (Elroshé → elroshe), then only letters used for the two-letter parts
+- If either part has fewer than 2 letters, we use what’s available; if both are empty, fallback to unk{year}r{row}
+- If duplicates occur in the same file, numeric suffixes are appended deterministically: bjaf2024, bjaf20242, bjaf20243
+- Cohort year is auto-detected from the input filename (first 20xx). You can override with --cohort-year
 
 ### Files
 - clean_and_split.py
@@ -46,9 +53,9 @@ This repository contains scripts to clean and restructure the cohort spreadsheet
      - python[3] clean_and_split.py -v --encoding utf-8 -o outputs_utf8 "path/to/input.csv"
 
 4) Check the outputs in the chosen output folder (e.g., outputs_run1/):
-   - table_personal_parent.csv
-   - table_study_support.csv
-   - table_engagement_progress.csv
+   - table_personal_parent.csv (includes Student_ID, ID_Number, Name, Surname, DOB/Age/Gender from SA ID)
+   - table_study_support.csv (keyed by Student_ID)
+   - table_engagement_progress.csv (keyed by Student_ID)
 
 5) Re-run/refresh outputs
    - Reuse the same folder (files get overwritten), or choose a new folder name to keep runs side‑by‑side.
@@ -109,25 +116,42 @@ This repository contains scripts to clean and restructure the cohort spreadsheet
 ### Output tables and columns
 
 1) outputs/table_personal_parent.csv
-- ID_Number
+- Student_ID (generated key)
+- ID_Number (SA ID)
 - Name
 - Surname
+- DOB (from SA ID)
+- Age (from SA ID)
+- Gender (from SA ID)
 - Address
 - Primary Contact
 - WhatsApp
 - Alternative
 - Parent/Guardian Name
 - Parent/Guardian Contact
+- Applicant Details
+- Family Details
+- ID Document
+- Bank Account
+- SARS Number
+- Learners / Licence
 - Comment_Time
 - Comment_Text
 - Photo
 
 2) outputs/table_study_support.csv
-- ID_Number
+- Student_ID (generated key)
+- ID_Number (SA ID)
 - Career Options/Study Details (Career Options; falls back to Study Details group text)
 - Academic Grouping
+- Academic Details 1
+- Academic Details 2
 - Support (concatenated group text)
 - Additional Support (concatenated group text)
+- CV
+- Study Application
+- W4AL course
+- Skills
 - Work Readiness Criteria (summary per preference above)
 - Pathways Recommendation
 - YearBeyond Recommendation
@@ -137,11 +161,19 @@ This repository contains scripts to clean and restructure the cohort spreadsheet
 - School WR rating roundup
 
 3) outputs/table_engagement_progress.csv
-- ID_Number
+- Student_ID (generated key)
+- ID_Number (SA ID)
 - Intro Session attended
+- Info session attended
 - Info Form received
 - Info Form returned
 - Mentor session attended
+- Visits to Office
+- Communication WhatsApp
+- Communication Facebook
+- #responses
+- ro
+- Datapoints
 - R1
 - R2
 - R3

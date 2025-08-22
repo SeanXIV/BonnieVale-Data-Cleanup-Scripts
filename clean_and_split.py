@@ -1,10 +1,9 @@
 import csv
 import os
 import re
-import glob
 import logging
-from datetime import datetime
 import argparse
+import unicodedata
 from typing import Dict, List, Tuple, Optional
 
 # Defaults; can be overridden via CLI
@@ -282,7 +281,46 @@ def setup_logging(verbose: bool = False):
     )
 
 
-def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: str = DEFAULT_ENCODING):
+def extract_year_from_filename(path: str, fallback: Optional[int] = None) -> int:
+    base = os.path.basename(path)
+    m = re.search(r"\b(20\d{2})\b", base)
+    if m:
+        return int(m.group(1))
+    if fallback is not None:
+        return fallback
+    from datetime import date
+    y = date.today().year
+    logging.warning(f"Cohort year not found in filename; defaulting to current year {y}.")
+    return y
+
+
+def slug_letters_two(s: str) -> str:
+    if not s:
+        return ""
+    # Normalize and remove accents
+    s_norm = unicodedata.normalize('NFKD', s)
+    s_ascii = ''.join(ch for ch in s_norm if not unicodedata.combining(ch))
+    # Keep only letters
+    letters = re.sub(r"[^A-Za-z]", "", s_ascii)
+    return letters[:2].lower()
+
+
+def build_student_id(name: str, surname: str, year: int, unique_counts: Dict[str, int], row_index: int) -> str:
+    n2 = slug_letters_two(name)
+    s2 = slug_letters_two(surname)
+    base = f"{n2}{s2}{year}"
+    if not n2 and not s2:
+        base = f"unk{year}r{row_index+1}"
+    # Ensure uniqueness
+    cnt = unique_counts.get(base, 0)
+    unique_counts[base] = cnt + 1
+    if cnt == 0:
+        return base
+    else:
+        return f"{base}{cnt+1}"
+
+
+def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: str = DEFAULT_ENCODING, cohort_year: Optional[int] = None):
     logging.info(f"Starting clean & split | input='{input_path}' | output_dir='{output_dir}'")
     try:
         headers, super_headers, rows = read_csv_with_multiline(input_path, encoding=encoding)
@@ -295,6 +333,9 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
     except Exception as e:
         logging.exception(f"Unexpected error reading '{input_path}': {e}")
         return 4
+    # Determine cohort year
+    year = cohort_year if cohort_year else extract_year_from_filename(input_path)
+    logging.info(f"Cohort year: {year}")
 
     if not rows:
         logging.warning("No data rows found.")
@@ -391,6 +432,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
 
     # Table 1: Personal & Parent Info
     t1_fields = [
+        "Student_ID",
         "ID_Number",
         "Name",
         "Surname",
@@ -417,6 +459,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
 
     # Table 2: Study & Support Info
     t2_fields = [
+        "Student_ID",
         "ID_Number",
         "Career Options/Study Details",
         "Academic Grouping",
@@ -441,6 +484,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
 
     # Table 3: Engagement & Progress Tracking
     t3_fields = [
+        "Student_ID",
         "ID_Number",
         "Intro Session attended",
         "Info session attended",
@@ -460,12 +504,20 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
     t3_rows: List[Dict[str, str]] = []
 
     missing_id_count = 0
+    # Track uniqueness for Student_ID
+    id_counts: Dict[str, int] = {}
 
-    for d in rows:
+    for idx, d in enumerate(rows):
         # ID key
         id_val = (d.get(id_col, "") if id_col else "").strip()
         if not id_val:
             missing_id_count += 1
+        # Build Student_ID (first 2 letters of name + first 2 of surname + year; unique suffix if needed)
+        student_id = build_student_id(d.get(name_col, "") if name_col else "",
+                                      d.get(surname_col, "") if surname_col else "",
+                                      year,
+                                      id_counts,
+                                      idx)
         # Contacts (learner)
         prim, wa, alt = parse_contact_field(d.get(contact_col, "") if contact_col else "")
         # Parent details
@@ -478,6 +530,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         if id_val and not valid_id:
             logging.warning(f"Invalid SA ID for row: id='{id_val}' reason='{invalid_reason}' name='{d.get(name_col, '') if name_col else ''} {d.get(surname_col, '') if surname_col else ''}'")
         t1_rows.append({
+            "Student_ID": student_id,
             "ID_Number": id_val,
             "Name": d.get(name_col, "") if name_col else "",
             "Surname": d.get(surname_col, "") if surname_col else "",
@@ -508,6 +561,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             wr_summary = group_slice_text(d, "Work Readiness Criteria")
 
         t2_rows.append({
+            "Student_ID": student_id,
             "ID_Number": id_val,
             "Career Options/Study Details": (d.get(career_col, "") if career_col else "") or group_slice_text(d, "Study Details") or group_slice_text(d, "Career Options"),
             "Academic Grouping": d.get(academic_group_col, "") if academic_group_col else "",
@@ -529,6 +583,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         })
 
         t3_rows.append({
+            "Student_ID": student_id,
             "ID_Number": id_val,
             "Intro Session attended": d.get(intro_session_col, "") if intro_session_col else "",
             "Info session attended": d.get(info_session_attended_col, "") if info_session_attended_col else "",
@@ -571,6 +626,11 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
     if missing_id_count:
         logging.warning(f"NOTE: {missing_id_count} row(s) missing ID Number; included with empty ID.")
 
+    # Student_ID uniqueness check
+    unique_ids = {r["Student_ID"] for r in t1_rows}
+    if len(unique_ids) != len(t1_rows):
+        logging.error("Student_IDs are not unique in Table 1; please inspect generation logic.")
+
     return 0
 
 
@@ -579,6 +639,7 @@ def parse_args():
     parser.add_argument("input", nargs="?", default=INPUT_PATH, help="Path to input CSV (default: %(default)s)")
     parser.add_argument("--output-dir", "-o", default=OUTPUT_DIR, help="Directory to write outputs (default: %(default)s)")
     parser.add_argument("--encoding", default=DEFAULT_ENCODING, help="File encoding (default: %(default)s)")
+    parser.add_argument("--cohort-year", type=int, default=None, help="Override cohort year in Student_IDs (e.g., 2024)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     return parser.parse_args()
 
@@ -586,7 +647,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(verbose=args.verbose)
-    exit_code = main(args.input, args.output_dir, args.encoding)
+    exit_code = main(args.input, args.output_dir, args.encoding, args.cohort_year)
     if exit_code:
         logging.error(f"Exited with code {exit_code}")
 
