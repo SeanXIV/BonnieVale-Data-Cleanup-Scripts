@@ -582,6 +582,24 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             "School WR rating roundup": d.get(wr_roundup_col, "") if wr_roundup_col else "",
         })
 
+        # Normalize 'ro' stars to numeric rating
+        def stars_to_number(val: str) -> str:
+            if not val:
+                return ""
+            s = str(val)
+            # If digits already present, return digits
+            m = re.search(r"\d+", s)
+            if m:
+                return m.group(0)
+            # Count star characters
+            count = s.count("★")
+            if count > 0:
+                return str(count)
+            # Handle common NA markers
+            if s.strip().upper() in {"N/A", "#N/A", "NA"}:
+                return ""
+            return ""
+
         t3_rows.append({
             "Student_ID": student_id,
             "ID_Number": id_val,
@@ -594,7 +612,7 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             "Communication WhatsApp": d.get(comm_whatsapp_col, "") if comm_whatsapp_col else "",
             "Communication Facebook": d.get(comm_facebook_col, "") if comm_facebook_col else "",
             "#responses": d.get(responses_col, "") if responses_col else "",
-            "ro": d.get('ro', ""),
+            "ro": stars_to_number(d.get('ro', "")),
             "Datapoints": d.get('Datapoints', ""),
             "R1": d.get(r1_col, "") if r1_col else "",
             "R2": d.get(r2_col, "") if r2_col else "",
