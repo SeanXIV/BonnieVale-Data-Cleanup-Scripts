@@ -528,7 +528,8 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         # Table 1 row
         dob_iso, age_str, gender, valid_id, invalid_reason = parse_sa_id_fields(id_val)
         if id_val and not valid_id:
-            logging.warning(f"Invalid SA ID for row: id='{id_val}' reason='{invalid_reason}' name='{d.get(name_col, '') if name_col else ''} {d.get(surname_col, '') if surname_col else ''}'")
+            norm_id = re.sub(r"[^0-9]", "", id_val)
+            logging.warning(f"Invalid SA ID for row: id='{norm_id}' reason='{invalid_reason}' name='{d.get(name_col, '') if name_col else ''} {d.get(surname_col, '') if surname_col else ''}'")
         t1_rows.append({
             "Student_ID": student_id,
             "ID_Number": id_val,
