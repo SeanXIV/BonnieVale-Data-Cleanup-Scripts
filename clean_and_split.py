@@ -197,6 +197,77 @@ def split_comments(text: str) -> Tuple[str, str]:
     return " ".join(times), cleaned
 
 
+def _luhn_sa_id_ok(digits: str) -> bool:
+    """Validate SA ID with Luhn-like algorithm on 13 digits."""
+    if len(digits) != 13 or not digits.isdigit():
+        return False
+    # Positions are 1-indexed in the spec; implement accordingly
+    # A = sum of digits in odd positions 1,3,5,7,9,11
+    a = sum(int(digits[i]) for i in [0, 2, 4, 6, 8, 10])
+    # B = concat even positions 2,4,6,8,10,12 -> as number *2, then sum digits
+    even_concat = digits[1] + digits[3] + digits[5] + digits[7] + digits[9] + digits[11]
+    b_num = int(even_concat) * 2
+    b = sum(int(ch) for ch in str(b_num))
+    c = a + b
+    d = (10 - (c % 10)) % 10
+    return d == int(digits[12])
+
+
+def parse_sa_id_fields(id_value: str) -> Tuple[str, str, str, bool, str]:
+    """Parse and validate South African ID.
+    Returns (dob_iso, age_str, gender, valid, reason_if_invalid).
+    Validation includes:
+    - 13 numeric digits
+    - Valid date of birth (YYMMDD) with century chosen to make plausible age [0..120]
+    - Check digit per SA Luhn algorithm
+    Gender is derived from sequence digits (7-10): >=5000 -> Male, else Female.
+    """
+    if not id_value:
+        return "", "", "", False, "empty"
+    digits = re.sub(r"[^0-9]", "", str(id_value))
+    if len(digits) != 13:
+        return "", "", "", False, "length"
+    yy = digits[0:2]
+    mm = digits[2:4]
+    dd = digits[4:6]
+    ssss = digits[6:10]
+    from datetime import date
+    today = date.today()
+
+    def try_century(century: int):
+        try:
+            dob = date(century + int(yy), int(mm), int(dd))
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            if 0 <= age <= 120:
+                return dob, age
+        except Exception:
+            return None
+        return None
+
+    dob_age_1900 = try_century(1900)
+    dob_age_2000 = try_century(2000)
+    if not dob_age_1900 and not dob_age_2000:
+        return "", "", "", False, "invalid_date"
+    # Prefer the century with age <= 100; if 1900 yields age > 100 and 2000 is valid, choose 2000
+    if dob_age_2000 and (not dob_age_1900 or dob_age_1900[1] > 100):
+        dob, age = dob_age_2000
+    else:
+        dob, age = dob_age_1900
+
+    if not _luhn_sa_id_ok(digits):
+        return "", "", "", False, "checksum"
+
+    # Gender from SSSS
+    gender = ""
+    try:
+        gender_num = int(ssss)
+        gender = "Male" if gender_num >= 5000 else "Female"
+    except Exception:
+        gender = ""
+
+    return dob.isoformat(), str(age), gender, True, ""
+
+
 def ensure_outputs_dir(path: str):
     if not os.path.isdir(path):
         os.makedirs(path, exist_ok=True)
@@ -323,6 +394,9 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         "ID_Number",
         "Name",
         "Surname",
+        "DOB (from SA ID)",
+        "Age (from SA ID)",
+        "Gender (from SA ID)",
         "Address",
         "Primary Contact",
         "WhatsApp",
@@ -400,10 +474,16 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         c_time, c_text = split_comments(d.get(comments_col, "") if comments_col else group_slice_text(d, "Comments"))
 
         # Table 1 row
+        dob_iso, age_str, gender, valid_id, invalid_reason = parse_sa_id_fields(id_val)
+        if id_val and not valid_id:
+            logging.warning(f"Invalid SA ID for row: id='{id_val}' reason='{invalid_reason}' name='{d.get(name_col, '') if name_col else ''} {d.get(surname_col, '') if surname_col else ''}'")
         t1_rows.append({
             "ID_Number": id_val,
             "Name": d.get(name_col, "") if name_col else "",
             "Surname": d.get(surname_col, "") if surname_col else "",
+            "DOB (from SA ID)": dob_iso,
+            "Age (from SA ID)": age_str,
+            "Gender (from SA ID)": gender,
             "Address": d.get(address_col, "") if address_col else "",
             "Primary Contact": prim or "",
             "WhatsApp": wa or "",
