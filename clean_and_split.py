@@ -196,6 +196,106 @@ def split_comments(text: str) -> Tuple[str, str]:
     return " ".join(times), cleaned
 
 
+def parse_applicant_details_fields(text: str) -> Tuple[str, str, str]:
+    """Extract Ras, Skoolprestasies, SASSA kindertoelaag from Applicant Details block.
+    Rules:
+    - Ras: If the first non-empty line begins with 'Ras', take the value after it.
+           Else, use the first non-empty line's full text.
+    - Skoolprestasies: find the first line starting with 'Skoolprestasies' or 'Skool prestasies'; take text after label.
+    - SASSA kindertoelaag: find the first line starting with that label; normalize to 'Ja' or 'Nee'.
+    """
+    if not text:
+        return "", "", ""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    ras = ""
+    skool = ""
+    sassa = ""
+    # Ras logic based on first non-empty line
+    if lines:
+        first = lines[0]
+        m = re.match(r"^\s*ras\s*[:]?\s*(.*)$", first, flags=re.IGNORECASE)
+        if m:
+            ras = m.group(1).strip()
+        else:
+            ras = first.strip()
+    # Skoolprestasies (search any line)
+    for ln in lines:
+        m = re.match(r"^\s*skool\s*prestasies\s*[:]?\s*(.*)$", ln, flags=re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            if val and not skool:
+                skool = val
+                break
+    # SASSA kindertoelaag (search any line)
+    for ln in lines:
+        m = re.match(r"^\s*sassa\s*kindertoelaag\s*[:]?\s*(.*)$", ln, flags=re.IGNORECASE)
+        if m:
+            val = m.group(1).strip()
+            if val:
+                low = val.lower()
+                if low.startswith("ja"):
+                    sassa = "Ja"
+                elif low.startswith("nee"):
+                    sassa = "Nee"
+            break
+    return ras, skool, sassa
+
+
+def parse_family_details_fields(text: str) -> Tuple[str, str, str, str, str, str]:
+    """Extract key fields from Family Details (Afrikaans).
+    Returns: (SASSA pensioen, Inkomste, Beroep van Ma, Beroep van Pa, Ma kwalifikasie, Pa kwalifikasie)
+    - SASSA pensioen normalized to Ja/Nee (blank if NA-like or missing)
+    - Other values preserved; NA-like become blank
+    """
+    if not text:
+        return "", "", "", "", "", ""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+
+    def first_match(pattern: str) -> Optional[str]:
+        for ln in lines:
+            m = re.match(pattern, ln, flags=re.IGNORECASE)
+            if m:
+                val = m.group(1).strip()
+                if val:
+                    return val
+        return None
+
+    def normalize_na(val: Optional[str]) -> str:
+        if val is None:
+            return ""
+        v = val.strip()
+        if v == "":
+            return ""
+        if v.upper() in {"N/A", "NA"} or v == "-":
+            return ""
+        return v
+
+    sassa_p = first_match(r"^\s*sassa\s*pensioen\s*:?\s*(.*)$")
+    inkomste = first_match(r"^\s*inkomste\s*:?\s*(.*)$")
+    beroep_ma = first_match(r"^\s*beroep\s*van\s*ma\s*:?\s*(.*)$")
+    beroep_pa = first_match(r"^\s*beroep\s*van\s*pa\s*:?\s*(.*)$")
+    kwal_ma = first_match(r"^\s*ma\s*kwalifikasie\s*:?\s*(.*)$")
+    kwal_pa = first_match(r"^\s*pa\s*kwalifikasie\s*:?\s*(.*)$")
+
+    # Normalize SASSA pensioen to Ja/Nee
+    sassa_norm = ""
+    if sassa_p:
+        low = sassa_p.lower()
+        if low.startswith("ja"):
+            sassa_norm = "Ja"
+        elif low.startswith("nee"):
+            sassa_norm = "Nee"
+
+    return (
+        sassa_norm,
+        normalize_na(inkomste),
+        normalize_na(beroep_ma),
+        normalize_na(beroep_pa),
+        normalize_na(kwal_ma),
+        normalize_na(kwal_pa),
+    )
+
+
 def _luhn_sa_id_ok(digits: str) -> bool:
     """Validate SA ID with Luhn-like algorithm on 13 digits."""
     if len(digits) != 13 or not digits.isdigit():
@@ -320,7 +420,7 @@ def build_student_id(name: str, surname: str, year: int, unique_counts: Dict[str
         return f"{base}{cnt+1}"
 
 
-def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: str = DEFAULT_ENCODING, cohort_year: Optional[int] = None):
+def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: str = DEFAULT_ENCODING, cohort_year: Optional[int] = None, strict: bool = False):
     logging.info(f"Starting clean & split | input='{input_path}' | output_dir='{output_dir}'")
     try:
         headers, super_headers, rows = read_csv_with_multiline(input_path, encoding=encoding)
@@ -340,6 +440,49 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
     if not rows:
         logging.warning("No data rows found.")
         return 0
+
+    # Stats and helpers for robust logging
+    stats = {
+        "warnings": 0,
+        "errors": 0,
+        "invalid_id_count": 0,
+        "row_errors": 0,
+        # Applicant Details diagnostics
+        "app_total": 0,
+        "app_empty": 0,
+        "app_ras_label": 0,
+        "app_ras_fallback": 0,
+        "app_skool_present": 0,
+        "app_skool_found": 0,
+        "app_sassa_present": 0,
+        "app_sassa_ja": 0,
+        "app_sassa_nee": 0,
+        "app_sassa_present_but_empty": 0,
+        # Family Details diagnostics
+        "fam_total": 0,
+        "fam_empty": 0,
+        "fam_sassa_present": 0,
+        "fam_sassa_ja": 0,
+        "fam_sassa_nee": 0,
+        "fam_sassa_present_but_empty": 0,
+        "fam_inkomste_present": 0,
+        "fam_inkomste_found": 0,
+        "fam_inkomste_present_but_empty": 0,
+        "fam_beroep_ma_present": 0,
+        "fam_beroep_ma_found": 0,
+        "fam_beroep_pa_present": 0,
+        "fam_beroep_pa_found": 0,
+        "fam_kqual_ma_present": 0,
+        "fam_kqual_ma_found": 0,
+        "fam_kqual_pa_present": 0,
+        "fam_kqual_pa_found": 0,
+    }
+    def log_warn(msg: str):
+        logging.warning(msg)
+        stats["warnings"] += 1
+    def log_error(msg: str):
+        logging.error(msg)
+        stats["errors"] += 1
     # Map required columns (best-effort; handle missing gracefully)
     col = {h.lower(): h for h in headers}
     def get_col(name: str) -> Optional[str]:
@@ -445,7 +588,16 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         "Alternative",
         "Parent/Guardian Name",
         "Parent/Guardian Contact",
+        "Ras",
+        "Skoolprestasies",
+        "SASSA kindertoelaag",
         "Applicant Details",
+        "SASSA pensioen",
+        "Inkomste",
+        "Beroep van Ma",
+        "Beroep van Pa",
+        "Ma kwalifikasie",
+        "Pa kwalifikasie",
         "Family Details",
         "ID Document",
         "Bank Account",
@@ -521,14 +673,44 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         prim, wa, alt = parse_contact_field(d.get(contact_col, "") if contact_col else "")
         # Parent details
         p_name, p_contact = parse_parent_details(d.get(parent_details_col, "") if parent_details_col else "")
-        # Comments
-        c_time, c_text = split_comments(d.get(comments_col, "") if comments_col else group_slice_text(d, "Comments"))
+        # Comments (time removed from output; keep text only)
+        _, c_text = split_comments(d.get(comments_col, "") if comments_col else group_slice_text(d, "Comments"))
 
         # Table 1 row
         dob_iso, age_str, gender, valid_id, invalid_reason = parse_sa_id_fields(id_val)
         if id_val and not valid_id:
             norm_id = re.sub(r"[^0-9]", "", id_val)
             logging.warning(f"Invalid SA ID for row: id='{norm_id}' reason='{invalid_reason}' name='{d.get(name_col, '') if name_col else ''} {d.get(surname_col, '') if surname_col else ''}'")
+            stats["invalid_id_count"] += 1
+        app_text = d.get(applicant_details_col, "") if applicant_details_col else ""
+        if app_text:
+            stats["app_total"] += 1
+        else:
+            stats["app_empty"] += 1
+        # Count presence of labels (even if empty values) for diagnostics
+        for ln in str(app_text).splitlines():
+            if re.match(r"^\s*ras\b", ln, flags=re.IGNORECASE):
+                stats["app_ras_label"] += 1
+                break
+        for ln in str(app_text).splitlines():
+            if re.match(r"^\s*skool\s*prestasies\b", ln, flags=re.IGNORECASE):
+                stats["app_skool_present"] += 1
+                break
+        for ln in str(app_text).splitlines():
+            if re.match(r"^\s*sassa\s*kindertoelaag\b", ln, flags=re.IGNORECASE):
+                stats["app_sassa_present"] += 1
+                break
+        ras_val, skool_val, sassa_val = parse_applicant_details_fields(app_text)
+        if ras_val and not re.match(r"^\s*ras\b", str(app_text).splitlines()[0] if app_text else "", flags=re.IGNORECASE):
+            stats["app_ras_fallback"] += 1
+        if skool_val:
+            stats["app_skool_found"] += 1
+        if sassa_val == "Ja":
+            stats["app_sassa_ja"] += 1
+        elif sassa_val == "Nee":
+            stats["app_sassa_nee"] += 1
+        elif stats["app_sassa_present"] > 0:
+            stats["app_sassa_present_but_empty"] += 1
         t1_rows.append({
             "Student_ID": student_id,
             "ID_Number": id_val,
@@ -543,7 +725,16 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             "Alternative": alt or "",
             "Parent/Guardian Name": p_name or "",
             "Parent/Guardian Contact": p_contact or "",
-            "Applicant Details": d.get(applicant_details_col, "") if applicant_details_col else "",
+            "Ras": ras_val,
+            "Skoolprestasies": skool_val,
+            "SASSA kindertoelaag": sassa_val,
+            "Applicant Details": app_text,
+            "SASSA pensioen": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[0],
+            "Inkomste": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[1],
+            "Beroep van Ma": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[2],
+            "Beroep van Pa": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[3],
+            "Ma kwalifikasie": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[4],
+            "Pa kwalifikasie": parse_family_details_fields(d.get(family_details_col, "") if family_details_col else "")[5],
             "Family Details": d.get(family_details_col, "") if family_details_col else "",
             "ID Document": d.get(id_doc_col, "") if id_doc_col else "",
             "Bank Account": d.get(bank_account_col, "") if bank_account_col else "",
@@ -558,6 +749,40 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         # If both empty, use grouped text under Work Readiness Criteria
         if not wr_summary:
             wr_summary = group_slice_text(d, "Work Readiness Criteria")
+
+        try:
+            fam_text = d.get(family_details_col, "") if family_details_col else ""
+            if fam_text:
+                stats["fam_total"] += 1
+            else:
+                stats["fam_empty"] += 1
+            # Presence counters
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*sassa\s*pensioen\b", ln, flags=re.IGNORECASE):
+                    stats["fam_sassa_present"] += 1
+                    break
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*inkomste\b", ln, flags=re.IGNORECASE):
+                    stats["fam_inkomste_present"] += 1
+                    break
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*beroep\s*van\s*ma\b", ln, flags=re.IGNORECASE):
+                    stats["fam_beroep_ma_present"] += 1
+                    break
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*beroep\s*van\s*pa\b", ln, flags=re.IGNORECASE):
+                    stats["fam_beroep_pa_present"] += 1
+                    break
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*ma\s*kwalifikasie\b", ln, flags=re.IGNORECASE):
+                    stats["fam_kqual_ma_present"] += 1
+                    break
+            for ln in str(fam_text).splitlines():
+                if re.match(r"^\s*pa\s*kwalifikasie\b", ln, flags=re.IGNORECASE):
+                    stats["fam_kqual_pa_present"] += 1
+                    break
+        except Exception as e:
+            logging.debug(f"Family details presence scan error: {e}")
 
         t2_rows.append({
             "Student_ID": student_id,
@@ -647,8 +872,17 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
     unique_ids = {r["Student_ID"] for r in t1_rows}
     if len(unique_ids) != len(t1_rows):
         logging.error("Student_IDs are not unique in Table 1; please inspect generation logic.")
+        stats["errors"] += 1
 
-    return 0
+    # Extra summary
+    logging.info(f"Invalid SA IDs: {stats['invalid_id_count']}")
+    # Applicant Details diagnostics
+    logging.info(f"Applicant Details: total={stats['app_total']} empty={stats['app_empty']} ras_label={stats['app_ras_label']} ras_fallback_used={stats['app_ras_fallback']} skool_present={stats['app_skool_present']} skool_found={stats['app_skool_found']} sassa_present={stats['app_sassa_present']} sassa_ja={stats['app_sassa_ja']} sassa_nee={stats['app_sassa_nee']} sassa_present_but_empty={stats['app_sassa_present_but_empty']}")
+    # Family Details diagnostics
+    logging.info(f"Family Details: total={stats['fam_total']} empty={stats['fam_empty']} sassa_present={stats['fam_sassa_present']} sassa_ja={stats['fam_sassa_ja']} sassa_nee={stats['fam_sassa_nee']} sassa_present_but_empty={stats['fam_sassa_present_but_empty']} inkomste_present={stats['fam_inkomste_present']} inkomste_found={stats['fam_inkomste_found']} inkomste_present_but_empty={stats['fam_inkomste_present_but_empty']} beroep_ma_present={stats['fam_beroep_ma_present']} beroep_ma_found={stats['fam_beroep_ma_found']} beroep_pa_present={stats['fam_beroep_pa_present']} beroep_pa_found={stats['fam_beroep_pa_found']} kwal_ma_present={stats['fam_kqual_ma_present']} kwal_ma_found={stats['fam_kqual_ma_found']} kwal_pa_present={stats['fam_kqual_pa_present']} kwal_pa_found={stats['fam_kqual_pa_found']}")
+    logging.info(f"Warnings: {stats['warnings']} | Errors: {stats['errors']}")
+
+    return 0 if stats["errors"] == 0 else 5
 
 
 def parse_args():
@@ -657,6 +891,7 @@ def parse_args():
     parser.add_argument("--output-dir", "-o", default=OUTPUT_DIR, help="Directory to write outputs (default: %(default)s)")
     parser.add_argument("--encoding", default=DEFAULT_ENCODING, help="File encoding (default: %(default)s)")
     parser.add_argument("--cohort-year", type=int, default=None, help="Override cohort year in Student_IDs (e.g., 2024)")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero on any error (and treat warnings as errors if combined with -v)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     return parser.parse_args()
 
@@ -664,7 +899,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(verbose=args.verbose)
-    exit_code = main(args.input, args.output_dir, args.encoding, args.cohort_year)
+    exit_code = main(args.input, args.output_dir, args.encoding, args.cohort_year, strict=args.strict)
     if exit_code:
         logging.error(f"Exited with code {exit_code}")
 
