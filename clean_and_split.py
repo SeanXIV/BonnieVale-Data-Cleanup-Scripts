@@ -451,7 +451,6 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
         "Bank Account",
         "SARS Number",
         "Learners / Licence",
-        "Comment_Time",
         "Comment_Text",
         "Photo",
     ]
@@ -548,9 +547,8 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             "Family Details": d.get(family_details_col, "") if family_details_col else "",
             "ID Document": d.get(id_doc_col, "") if id_doc_col else "",
             "Bank Account": d.get(bank_account_col, "") if bank_account_col else "",
-            "SARS Number": d.get(sars_number_col, "") if sars_number_col else "",
-            "Learners / Licence": d.get(learners_licence_col, "") if learners_licence_col else "",
-            "Comment_Time": c_time,
+            "SARS Number": (d.get(sars_number_col, "") if sars_number_col else "").replace("-","None") if (d.get(sars_number_col, "") if sars_number_col else "") == "-" else (d.get(sars_number_col, "") if sars_number_col else ""),
+            "Learners / Licence": (d.get(learners_licence_col, "") if learners_licence_col else "").replace("-","None") if (d.get(learners_licence_col, "") if learners_licence_col else "") == "-" else (d.get(learners_licence_col, "") if learners_licence_col else ""),
             "Comment_Text": c_text,
             "Photo": d.get(photo_col, "") if photo_col else "",
         })
