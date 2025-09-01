@@ -725,9 +725,9 @@ def main(input_path: str = INPUT_PATH, output_dir: str = OUTPUT_DIR, encoding: s
             "Alternative": alt or "",
             "Parent/Guardian Name": p_name or "None",
             "Parent/Guardian Contact": p_contact or "None",
-            "Ras": ras_val,
-            "Skoolprestasies": skool_val,
-            "SASSA kindertoelaag": sassa_val,
+            "Ras": (ras_val if (ras_val and ras_val.strip() not in ("-",) and ras_val.strip().upper() not in ("NA","N/A")) else "None"),
+            "Skoolprestasies": (skool_val if (skool_val and skool_val.strip() not in ("-",) and skool_val.strip().upper() not in ("NA","N/A")) else "None"),
+            "SASSA kindertoelaag": (sassa_val if sassa_val in ("Ja","Nee") else "None"),
             "Applicant Details": app_text,
             **(lambda _vals: {
                 "SASSA pensioen": _vals[0] or "None",
